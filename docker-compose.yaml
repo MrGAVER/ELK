@@ -20,6 +20,9 @@ services:
       - ${VOLUMES_PATH}/elasticsearch/data:/usr/share/elasticsearch/data
     networks:
       - els
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
 
   elasticsearch:
     image: elasticsearch:${ELASTIC_VERSION}
@@ -38,8 +41,12 @@ services:
       - els
     ports:
       - "9200:9200"
-    depends_on:
-      - setup
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200 | grep -q 'missing authentication credentials'"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 30s
 
   kibana:
     image: kibana:${ELASTIC_VERSION}
@@ -55,4 +62,13 @@ services:
     networks:
       - els
     depends_on:
-      - elasticsearch
+      elasticsearch:
+        condition: service_healthy
+      setup:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -I http://localhost:5601 | grep -q 'HTTP/1.1 302 Found'"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 30s
