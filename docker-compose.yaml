@@ -5,9 +5,11 @@ networks:
     driver: bridge
 
 services:
+  # Первоначальные настройки ES
   setup:
     image: elasticsearch:${ELASTIC_VERSION}
     user: "0"
+    # Ждем запуска ES и после этого устанавливаем пароль для пользователя kibana_system
     command: >
       bash -c '
         echo "Waiting for Elasticsearch";
@@ -16,23 +18,26 @@ services:
         until curl -s -X POST -u "elastic:${ELASTIC_PASSWORD}" -H "Content-Type: application/json" ${ELASTIC_URL}/_security/user/kibana_system/_password -d "{\"password\":\"${KIBANA_PASSWORD}\"}" | grep -q "^{}"; do sleep 10; done;
         echo "Done";
       '
-    volumes:
-      - ${VOLUMES_PATH}/elasticsearch/data:/usr/share/elasticsearch/data
     networks:
       - els
     depends_on:
       elasticsearch:
         condition: service_healthy
 
+  # Сервис Elasticsearch
   elasticsearch:
     image: elasticsearch:${ELASTIC_VERSION}
     container_name: elasticsearch
     environment:
+      # Режим кластера (single-node)
       - discovery.type=single-node
+      # Имя ноды
       - node.name=elasticsearch
+      # Название кластера
       - cluster.name=els
       - xpack.security.enabled=true
       - xpack.license.self_generated.type=basic
+      # Пароль пользователя elastic
       - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
     volumes:
       - ${VOLUMES_PATH}/elasticsearch/data:/usr/share/elasticsearch/data
@@ -48,14 +53,20 @@ services:
       retries: 15
       start_period: 30s
 
+  # Сервис Kibana
   kibana:
     image: kibana:${ELASTIC_VERSION}
     container_name: kibana
     environment:
+      # Имя сервера
       - server.name=kibana
+      # Имя пользователя в кластере Elasticsearch
       - ELASTICSEARCH_USERNAME=kibana_system
+      # Пароль пользователя
       - ELASTICSEARCH_PASSWORD=${KIBANA_PASSWORD}
+      # Хосты Elasticsearch
       - ELASTICSEARCH_HOSTS=${ELASTIC_URL}
+      # Для отображения загрузки ЦП контейнером
       - monitoring.ui.container.elasticsearch.enabled=true
     ports:
       - "5601:5601"
