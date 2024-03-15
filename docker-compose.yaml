@@ -9,13 +9,29 @@ services:
   setup:
     image: elasticsearch:${ELASTIC_VERSION}
     user: "0"
-    # Ждем запуска ES и после этого устанавливаем пароль для пользователя kibana_system
+    # Ждем запуска ES
+    # Устанавливаем пароль для пользователя kibana_system, logstash_system
+    # Создаем группу logstash_manage
+    # Создаем пользователя ${ELASTIC_PASSWORD}
     command: >
       bash -c '
         echo "Waiting for Elasticsearch";
         until curl -s ${ELASTIC_URL} | grep -q "missing authentication credentials"; do sleep 10; done;
         echo "Setting kibana_system password";
         until curl -s -X POST -u "elastic:${ELASTIC_PASSWORD}" -H "Content-Type: application/json" ${ELASTIC_URL}/_security/user/kibana_system/_password -d "{\"password\":\"${KIBANA_PASSWORD}\"}" | grep -q "^{}"; do sleep 10; done;
+        echo "Setting logstash_system password";
+        until curl -s -X POST -u "elastic:${ELASTIC_PASSWORD}" -H "Content-Type: application/json" ${ELASTIC_URL}/_security/user/logstash_system/_password -d "{\"password\":\"${LOGSTASH_PASSWORD}\"}" | grep -q "^{}"; do sleep 10; done;
+        if curl -s -u "elastic:${ELASTIC_PASSWORD}" ${ELASTIC_URL}/_security/role/logstash_manage | grep -q "^{}"; then
+          echo "Creating logstash_manage role";
+          until curl -s -X POST -u "elastic:${ELASTIC_PASSWORD}" -H "Content-Type: application/json" ${ELASTIC_URL}/_security/role/logstash_manage -d "{\"cluster\": [\"manage_index_templates\", \"monitor\", \"manage_ilm\"], \"indices\": [{\"names\": [\"logs_*\"], \"privileges\": [\"all\"]}]}" | grep -q "true"; do sleep 10; done;
+        fi
+        if curl -s -u "elastic:${ELASTIC_PASSWORD}" ${ELASTIC_URL}/_security/user/${LOGSTASH_ADMIN_USER} | grep -q "^{}"; then
+          echo "Creating ${LOGSTASH_ADMIN_USER} user";
+          until curl -s -X POST -u "elastic:${ELASTIC_PASSWORD}" -H "Content-Type:application/json" ${ELASTIC_URL}/_security/user/${LOGSTASH_ADMIN_USER}?pretty -d "{\"password\":\"${LOGSTASH_ADMIN_PASSWORD}\", \"roles\":[\"logstash_admin\", \"logstash_system\", \"logstash_manage\"]}" | grep -q "true"; do sleep 10; done;
+        else
+          echo "Setting ${LOGSTASH_ADMIN_USER} password";
+          until curl -s -X POST -u "elastic:${ELASTIC_PASSWORD}" -H "Content-Type: application/json" ${ELASTIC_URL}/_security/user/${LOGSTASH_ADMIN_USER}/_password -d "{\"password\":\"${LOGSTASH_ADMIN_PASSWORD}\"}" | grep -q "^{}"; do sleep 10; done;
+        fi
         echo "Done";
       '
     networks:
@@ -29,6 +45,8 @@ services:
     image: elasticsearch:${ELASTIC_VERSION}
     container_name: elasticsearch
     environment:
+      #Конфигурация JVM
+      - ES_JAVA_OPTS=-Xmx512m -Xms512m
       # Режим кластера (single-node)
       - discovery.type=single-node
       # Имя ноды
@@ -52,6 +70,11 @@ services:
       timeout: 10s
       retries: 15
       start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 600M
 
   # Сервис Kibana
   kibana:
@@ -68,6 +91,7 @@ services:
       - ELASTICSEARCH_HOSTS=${ELASTIC_URL}
       # Для отображения загрузки ЦП контейнером
       - monitoring.ui.container.elasticsearch.enabled=true
+    restart: always
     ports:
       - "5601:5601"
     networks:
@@ -83,3 +107,62 @@ services:
       timeout: 10s
       retries: 15
       start_period: 30s
+
+  # Сервис Logstash
+  # Используется для обработки и передачи логов в Elasticsearch
+  logstash:
+    image: logstash:${ELASTIC_VERSION}
+    container_name: logstash
+    environment:
+      #Конфигурация JVM
+      - LS_JAVA_OPTS=-Xmx512m -Xms512m
+      # Имя пользователя в кластере Elasticsearch (для конфигурирования файла logstash.yml)
+      - xpack.monitoring.elasticsearch.username=logstash_system
+      # Пароль пользователя (для конфигурирования файла logstash.yml)
+      - xpack.monitoring.elasticsearch.password=${LOGSTASH_PASSWORD}
+      # Имя пользователя в кластере Elasticsearch (для pipeline)
+      - ES_USER=${LOGSTASH_ADMIN_USER}
+      # Пароль пользователя (для pipeline)
+      - ES_PASSWORD=${LOGSTASH_ADMIN_PASSWORD}
+      # Хосты Elasticsearch
+      - ELASTICSEARCH_HOSTS=${ELASTIC_URL}
+    volumes:
+      - ./configs/logstash/pipelines.yml:/usr/share/logstash/config/pipelines.yml:ro
+      - ./configs/logstash/pipelines:/usr/share/logstash/pipeline:ro
+    restart: always
+    ports:
+      - "9600:9600"
+      - "5044:5044"
+    networks:
+      - els
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      setup:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 600M
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9600 | grep -q 'green'"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 30s
+
+  # Сервис Filebeat
+  # Используется для передачи логов в Logstash
+  beats:
+    image: elastic/filebeat:${ELASTIC_VERSION}
+    command: filebeat -e -strict.perms=false
+    volumes:
+      - ./configs/filebeat/config.yml:/usr/share/filebeat/filebeat.yml:ro
+      - ${VOLUMES_PATH}/filebeat:/metrics:ro
+    restart: always
+    networks:
+      - els
+    depends_on:
+      logstash:
+        condition: service_healthy
