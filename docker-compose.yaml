@@ -12,33 +12,60 @@ services:
     # Ждем запуска ES
     # Устанавливаем пароль для пользователя kibana_system, logstash_system
     # Создаем группу logstash_manage
-    # Создаем пользователя ${ELASTIC_PASSWORD}
-    command: >
-      bash -c '
-        echo "Waiting for Elasticsearch";
-        until curl -s ${ELASTIC_URL} | grep -q "missing authentication credentials"; do sleep 10; done;
-        echo "Setting kibana_system password";
-        until curl -s -X POST -u "elastic:${ELASTIC_PASSWORD}" -H "Content-Type: application/json" ${ELASTIC_URL}/_security/user/kibana_system/_password -d "{\"password\":\"${KIBANA_PASSWORD}\"}" | grep -q "^{}"; do sleep 10; done;
-        echo "Setting logstash_system password";
-        until curl -s -X POST -u "elastic:${ELASTIC_PASSWORD}" -H "Content-Type: application/json" ${ELASTIC_URL}/_security/user/logstash_system/_password -d "{\"password\":\"${LOGSTASH_PASSWORD}\"}" | grep -q "^{}"; do sleep 10; done;
-        if curl -s -u "elastic:${ELASTIC_PASSWORD}" ${ELASTIC_URL}/_security/role/logstash_manage | grep -q "^{}"; then
-          echo "Creating logstash_manage role";
-          until curl -s -X POST -u "elastic:${ELASTIC_PASSWORD}" -H "Content-Type: application/json" ${ELASTIC_URL}/_security/role/logstash_manage -d "{\"cluster\": [\"manage_index_templates\", \"monitor\", \"manage_ilm\"], \"indices\": [{\"names\": [\"logs_*\"], \"privileges\": [\"all\"]}]}" | grep -q "true"; do sleep 10; done;
-        fi
-        if curl -s -u "elastic:${ELASTIC_PASSWORD}" ${ELASTIC_URL}/_security/user/${LOGSTASH_ADMIN_USER} | grep -q "^{}"; then
-          echo "Creating ${LOGSTASH_ADMIN_USER} user";
-          until curl -s -X POST -u "elastic:${ELASTIC_PASSWORD}" -H "Content-Type:application/json" ${ELASTIC_URL}/_security/user/${LOGSTASH_ADMIN_USER}?pretty -d "{\"password\":\"${LOGSTASH_ADMIN_PASSWORD}\", \"roles\":[\"logstash_admin\", \"logstash_system\", \"logstash_manage\"]}" | grep -q "true"; do sleep 10; done;
-        else
-          echo "Setting ${LOGSTASH_ADMIN_USER} password";
-          until curl -s -X POST -u "elastic:${ELASTIC_PASSWORD}" -H "Content-Type: application/json" ${ELASTIC_URL}/_security/user/${LOGSTASH_ADMIN_USER}/_password -d "{\"password\":\"${LOGSTASH_ADMIN_PASSWORD}\"}" | grep -q "^{}"; do sleep 10; done;
-        fi
-        echo "Done";
-      '
+    # Создаем пользователя ${LOGSTASH_ADMIN_USER}
+    command:
+      - bash
+      - -c
+      - |
+        echo "Waiting for Elasticsearch"
+        until curl -s ${ELASTIC_URL} | grep -q "missing authentication credentials"
+        do
+          sleep 10
+        done
+
+        echo "Setting kibana_system password"
+        until curl -s -X POST \
+                    -H "Content-Type: application/json" \
+                    -u "elastic:${ELASTIC_PASSWORD}" \
+                    ${ELASTIC_URL}/_security/user/kibana_system/_password \
+                    -d '{"password":"${KIBANA_PASSWORD}"}' | grep -q "^{}"
+        do sleep 10; done
+
+        echo "Setting logstash_system password"
+        until curl -s -X POST \
+                    -H "Content-Type: application/json" \
+                    -u "elastic:${ELASTIC_PASSWORD}" \
+                    ${ELASTIC_URL}/_security/user/logstash_system/_password \
+                    -d '{"password":"${LOGSTASH_PASSWORD}"}' | grep -q "^{}"
+        do sleep 10; done
+
+        until ! curl -s -u "elastic:${ELASTIC_PASSWORD}" ${ELASTIC_URL}/_security/role/logstash_manage | grep -q "^{}"
+        do
+          echo "Creating logstash_manage role"
+          curl -s -X POST \
+                -H "Content-Type: application/json" \
+                -u "elastic:${ELASTIC_PASSWORD}" \
+                ${ELASTIC_URL}/_security/role/logstash_manage \
+                -d '{"cluster": ["manage_index_templates", "monitor", "manage_ilm"], "indices": [{"names": ["logs_*"], "privileges": ["all"]}]}' \
+                >/dev/null
+          sleep 10
+        done
+        
+        until ! curl -s -u "elastic:${ELASTIC_PASSWORD}" ${ELASTIC_URL}/_security/user/logstash_admin | grep -q "^{}"
+        do
+          echo "Creating ${LOGSTASH_ADMIN_USER} user"
+          curl -s -X POST \
+                -H "Content-Type:application/json" \
+                -u "elastic:${ELASTIC_PASSWORD}" \
+                ${ELASTIC_URL}/_security/user/${LOGSTASH_ADMIN_USER} \
+                -d '{"password":"${LOGSTASH_ADMIN_PASSWORD}", "roles":["logstash_admin", "logstash_system", "logstash_manage"]}' \
+                >/dev/null
+          sleep 10
+        done
+
+        echo "Done"
     networks:
       - els
-    depends_on:
-      elasticsearch:
-        condition: service_healthy
 
   # Сервис Elasticsearch
   elasticsearch:
