@@ -17,14 +17,55 @@ services:
       - bash
       - -c
       - |
+        if [ ! -f config/certs/ca.zip ]
+        then
+          echo "Creating CA"
+          bin/elasticsearch-certutil ca --silent --pem -out config/certs/ca.zip
+          unzip config/certs/ca.zip -d config/certs/
+          mv config/certs/ca/ca.key config/certs
+          cp config/certs/ca/ca.crt config/certs/logstash
+        fi
+
+        if [ ! -f config/certs/certs.zip ]
+        then
+          echo "Creating certs"
+          echo -ne \
+          "instances:\n" \
+          "  - name: elasticsearch\n" \
+          "    dns:\n" \
+          "      - elasticsearch\n" \
+          "      - localhost\n" \
+          "    ip:\n" \
+          "      - 127.0.0.1\n" \
+          "  - name: kibana\n" \
+          "    dns:\n" \
+          "      - kibana\n" \
+          "      - localhost\n" \
+          "    ip:\n" \
+          "      - 127.0.0.1\n" \
+          "  - name: logstash\n" \
+          "    dns:\n" \
+          "      - logstash\n" \
+          "      - localhost\n" \
+          "    ip:\n" \
+          "      - 127.0.0.1\n" \
+          > config/certs/instances.yml
+          bin/elasticsearch-certutil cert --silent --pem --ca-cert config/certs/ca/ca.crt --ca-key config/certs/ca.key --in config/certs/instances.yml -out config/certs/certs.zip
+          unzip config/certs/certs.zip -d config/certs
+        fi
+
+        echo "Setting file permissions"
+        find config/certs -type d ! -path '*logstash*' | xargs -I {} chown -R root:root {}
+        find config/certs -type d ! -path '*logstash*' | xargs -I {} chmod 750 {}
+        find config/certs -type f ! -path '*logstash*' | xargs -I {} chmod 640 {}
+
         echo "Waiting for Elasticsearch"
-        until curl -s ${ELASTIC_URL} | grep -q "missing authentication credentials"
-        do
-          sleep 10
-        done
+        until curl -s --cacert config/certs/ca/ca.crt ${ELASTIC_URL} | grep -q "missing authentication credentials"
+        do sleep 10; done
 
         echo "Setting kibana_system password"
-        until curl -s -X POST \
+        until curl -s --cacert config/certs/ca/ca.crt \
+                    -X POST \
                     -H "Content-Type: application/json" \
                     -u "elastic:${ELASTIC_PASSWORD}" \
                     ${ELASTIC_URL}/_security/user/kibana_system/_password \
@@ -32,17 +73,19 @@ services:
         do sleep 10; done
 
         echo "Setting logstash_system password"
-        until curl -s -X POST \
+        until curl -s --cacert config/certs/ca/ca.crt \
+                    -X POST \
                     -H "Content-Type: application/json" \
                     -u "elastic:${ELASTIC_PASSWORD}" \
                     ${ELASTIC_URL}/_security/user/logstash_system/_password \
                     -d '{"password":"${LOGSTASH_PASSWORD}"}' | grep -q "^{}"
         do sleep 10; done
 
-        until ! curl -s -u "elastic:${ELASTIC_PASSWORD}" ${ELASTIC_URL}/_security/role/logstash_manage | grep -q "^{}"
+        until ! curl -s --cacert config/certs/ca/ca.crt -u "elastic:${ELASTIC_PASSWORD}" ${ELASTIC_URL}/_security/role/logstash_manage | grep -q "^{}"
         do
           echo "Creating logstash_manage role"
-          curl -s -X POST \
+          curl -s --cacert config/certs/ca/ca.crt \
+                -X POST \
                 -H "Content-Type: application/json" \
                 -u "elastic:${ELASTIC_PASSWORD}" \
                 ${ELASTIC_URL}/_security/role/logstash_manage \
@@ -51,10 +94,11 @@ services:
           sleep 10
         done
         
-        until ! curl -s -u "elastic:${ELASTIC_PASSWORD}" ${ELASTIC_URL}/_security/user/logstash_admin | grep -q "^{}"
+        until ! curl -s --cacert config/certs/ca/ca.crt -u "elastic:${ELASTIC_PASSWORD}" ${ELASTIC_URL}/_security/user/logstash_admin | grep -q "^{}"
         do
           echo "Creating ${LOGSTASH_ADMIN_USER} user"
-          curl -s -X POST \
+          curl -s --cacert config/certs/ca/ca.crt \
+                -X POST \
                 -H "Content-Type:application/json" \
                 -u "elastic:${ELASTIC_PASSWORD}" \
                 ${ELASTIC_URL}/_security/user/${LOGSTASH_ADMIN_USER} \
@@ -64,8 +108,16 @@ services:
         done
 
         echo "Done"
+    volumes:
+      - ${VOLUMES_PATH}/elasticsearch/certs:/usr/share/elasticsearch/config/certs
     networks:
       - els
+    healthcheck:
+      test: ["CMD-SHELL", "[ -f config/certs/elasticsearch/elasticsearch.crt ]"]
+      interval: 1s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
 
   # Сервис Elasticsearch
   elasticsearch:
@@ -80,23 +132,48 @@ services:
       - node.name=elasticsearch
       # Название кластера
       - cluster.name=els
+      # Включение стандартных опций безопасности
       - xpack.security.enabled=true
+      # Включение ssl
+      - xpack.security.transport.ssl.enabled=true
+      # Путь к закрытому ключу ssl
+      - xpack.security.transport.ssl.key=certs/elasticsearch/elasticsearch.key
+      # Путь к сертификату ssl
+      - xpack.security.transport.ssl.certificate=certs/elasticsearch/elasticsearch.crt
+      # Путь к сертификату издателя ssl
+      - xpack.security.transport.ssl.certificate_authorities=certs/ca/ca.crt
+      # Режим проверки сертификата
+      - xpack.security.transport.ssl.verification_mode=certificate
+      # Включение https
+      - xpack.security.http.ssl.enabled=true
+      # Путь к закрытому ключу https
+      - xpack.security.http.ssl.key=certs/elasticsearch/elasticsearch.key
+      # Путь к сертификату https
+      - xpack.security.http.ssl.certificate=certs/elasticsearch/elasticsearch.crt
+      # Путь к сертификату издателя
+      - xpack.security.http.ssl.certificate_authorities=certs/ca/ca.crt
+      # Тип лицензии
       - xpack.license.self_generated.type=basic
       # Пароль пользователя elastic
       - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
     volumes:
+      - ${VOLUMES_PATH}/elasticsearch/certs/elasticsearch:/usr/share/elasticsearch/config/certs/elasticsearch:ro
+      - ${VOLUMES_PATH}/elasticsearch/certs/ca:/usr/share/elasticsearch/config/certs/ca:ro
       - ${VOLUMES_PATH}/elasticsearch/data:/usr/share/elasticsearch/data
     restart: always
     networks:
       - els
     ports:
       - "9200:9200"
+    depends_on:
+      setup:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "curl -s http://localhost:9200 | grep -q 'missing authentication credentials'"]
+      test: ["CMD-SHELL", "curl -s --cacert config/certs/ca/ca.crt https://localhost:9200 | grep -q 'missing authentication credentials'"]
       interval: 10s
       timeout: 10s
-      retries: 15
-      start_period: 30s
+      retries: 30
+      start_period: 60s
     deploy:
       resources:
         limits:
@@ -109,15 +186,26 @@ services:
     container_name: kibana
     environment:
       # Имя сервера
-      - server.name=kibana
+      SERVERNAME: kibana
       # Имя пользователя в кластере Elasticsearch
-      - ELASTICSEARCH_USERNAME=kibana_system
+      ELASTICSEARCH_USERNAME: kibana_system
       # Пароль пользователя
-      - ELASTICSEARCH_PASSWORD=${KIBANA_PASSWORD}
+      ELASTICSEARCH_PASSWORD: ${KIBANA_PASSWORD}
       # Хосты Elasticsearch
-      - ELASTICSEARCH_HOSTS=${ELASTIC_URL}
+      ELASTICSEARCH_HOSTS: '["${ELASTIC_URL}"]'
       # Для отображения загрузки ЦП контейнером
-      - monitoring.ui.container.elasticsearch.enabled=true
+      monitoring.ui.container.elasticsearch.enabled: true
+      # Включение ssl
+      SERVER_SSL_ENABLED: true
+      # Путь к сертификату
+      SERVER_SSL_CERTIFICATE: config/certs/kibana/kibana.crt
+      # Путь к закрытому ключу
+      SERVER_SSL_KEY: config/certs/kibana/kibana.key
+      # Путь к сертификату издателя
+      ELASTICSEARCH_SSL_CERTIFICATEAUTHORITIES: config/certs/ca/ca.crt
+    volumes:
+      - ${VOLUMES_PATH}/elasticsearch/certs/kibana:/usr/share/kibana/config/certs/kibana:ro
+      - ${VOLUMES_PATH}/elasticsearch/certs/ca:/usr/share/kibana/config/certs/ca:ro
     restart: always
     ports:
       - "5601:5601"
@@ -126,10 +214,8 @@ services:
     depends_on:
       elasticsearch:
         condition: service_healthy
-      setup:
-        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD-SHELL", "curl -s -I http://localhost:5601 | grep -q 'HTTP/1.1 302 Found'"]
+      test: ["CMD-SHELL", "curl -s --cacert config/certs/ca/ca.crt https://localhost:5601/api/status | grep -q 'available'"]
       interval: 10s
       timeout: 10s
       retries: 15
@@ -142,18 +228,23 @@ services:
     container_name: logstash
     environment:
       #Конфигурация JVM
-      - LS_JAVA_OPTS=-Xmx512m -Xms512m
+      LS_JAVA_OPTS: -Xmx512m -Xms512m
       # Имя пользователя в кластере Elasticsearch (для конфигурирования файла logstash.yml)
-      - xpack.monitoring.elasticsearch.username=logstash_system
+      xpack.monitoring.elasticsearch.username: logstash_system
       # Пароль пользователя (для конфигурирования файла logstash.yml)
-      - xpack.monitoring.elasticsearch.password=${LOGSTASH_PASSWORD}
+      xpack.monitoring.elasticsearch.password: ${LOGSTASH_PASSWORD}
       # Имя пользователя в кластере Elasticsearch (для pipeline)
-      - ES_USER=${LOGSTASH_ADMIN_USER}
+      ES_USER: ${LOGSTASH_ADMIN_USER}
       # Пароль пользователя (для pipeline)
-      - ES_PASSWORD=${LOGSTASH_ADMIN_PASSWORD}
-      # Хосты Elasticsearch
-      - ELASTICSEARCH_HOSTS=${ELASTIC_URL}
+      ES_PASSWORD: ${LOGSTASH_ADMIN_PASSWORD}
+      # Хосты Elasticsearch (для logstash.yml)
+      xpack.monitoring.elasticsearch.hosts: '["${ELASTIC_URL}"]'
+      # Хосты Elasticsearch (для pipeline)
+      ELASTICSEARCH_HOSTS: "${ELASTIC_URL}"
+      # Путь к сертификату издателя
+      xpack.monitoring.elasticsearch.ssl.certificate_authority: config/certs/logstash/ca.crt
     volumes:
+      - ${VOLUMES_PATH}/elasticsearch/certs/logstash:/usr/share/logstash/config/certs/logstash:ro
       - ./configs/logstash/pipelines.yml:/usr/share/logstash/config/pipelines.yml:ro
       - ./configs/logstash/pipelines:/usr/share/logstash/pipeline:ro
     restart: always
@@ -165,8 +256,6 @@ services:
     depends_on:
       elasticsearch:
         condition: service_healthy
-      setup:
-        condition: service_completed_successfully
     deploy:
       resources:
         limits:
@@ -185,6 +274,7 @@ services:
     image: elastic/filebeat:${ELASTIC_VERSION}
     command: filebeat -e -strict.perms=false
     volumes:
+      - ${VOLUMES_PATH}/elasticsearch/certs/logstash:/usr/share/filebeat/config/certs/logstash:ro
       - ./configs/filebeat/config.yml:/usr/share/filebeat/filebeat.yml:ro
       - ${VOLUMES_PATH}/filebeat:/metrics:ro
     restart: always
