@@ -1,8 +1,20 @@
 version: "3.8"
 
 networks:
+  # Сеть для компонентов elasticsearch
   els:
     driver: bridge
+  # Сеть между Grafana и базой данных
+  grafana-db:
+    driver: bridge
+
+secrets:
+  # Пароль postgres используемый grafana
+  postgres_grafana_password:
+    file: ./secrets/postgres_grafana_password
+  # Пароль административной учетной записи grafana
+  grafana_admin_password:
+    file: ./secrets/grafana_admin_password
 
 services:
   # Первоначальные настройки ES
@@ -283,3 +295,79 @@ services:
     depends_on:
       logstash:
         condition: service_healthy
+
+# ------------------------------------------------------------------------------------------------------------
+
+  # База данных postgres для grafana
+  postgres-grafana:
+    image: postgres:16
+    container_name: postgres-grafana
+    secrets:
+      - postgres_grafana_password
+    environment:
+      # Имя пользователя для доступа к БД
+      POSTGRES_USER: ${GRAFANA_POSTGRES_USER}
+      # Файл с паролем для доступа к БД
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_grafana_password
+    volumes:
+      - ${VOLUMES_PATH}/postgres/data:/var/lib/postgresql/data
+    restart: always
+    ports:
+      - 5432:5432
+    networks:
+      - grafana-db
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 600M
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${GRAFANA_POSTGRES_USER} -d ${GRAFANA_POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+
+  # Сервис Grafana
+  grafana:
+    image: grafana/grafana
+    container_name: grafana
+    secrets:
+      - grafana_admin_password
+      - postgres_grafana_password
+    environment:
+      # Имя административного пользователя
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER}
+      # Файл с паролем административного пользователя
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_admin_password
+      # Тип БД используемый grafana
+      GF_DATABASE_TYPE: postgres
+      # Адрес БД
+      GF_DATABASE_HOST: postgres-grafana:5432
+      # Название БД
+      GF_DATABASE_NAME: ${GRAFANA_POSTGRES_DB}
+      # Имя пользователя в БД
+      GF_DATABASE_USER: ${GRAFANA_POSTGRES_USER}
+      # Файл с паролем для пользователя БД
+      GF_DATABASE_PASSWORD__FILE: /run/secrets/postgres_grafana_password
+    volumes:
+      - ${VOLUMES_PATH}/grafana/data:/var/lib/grafana
+    restart: always
+    ports:
+      - 3000:3000
+    networks:
+      - grafana-db
+    depends_on:
+      postgres-grafana:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 600M
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:3000/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
