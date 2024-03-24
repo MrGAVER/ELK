@@ -21,6 +21,7 @@ services:
   setup:
     image: elasticsearch:${ELASTIC_VERSION}
     user: "0"
+    # Создаем сертификаты для сервисов и устанавливаем привилегии на файлы
     # Ждем запуска ES
     # Устанавливаем пароль для пользователя kibana_system, logstash_system
     # Создаем группу logstash_manage
@@ -33,9 +34,8 @@ services:
         then
           echo "Creating CA"
           bin/elasticsearch-certutil ca --silent --pem -out config/certs/ca.zip
-          unzip config/certs/ca.zip -d config/certs/
-          mv config/certs/ca/ca.key config/certs
-          cp config/certs/ca/ca.crt config/certs/logstash
+          if [ -d config/certs/ca/ca.crt ]; then rm -rf config/certs/ca/ca.crt; fi
+          unzip -o config/certs/ca.zip -d config/certs/
         fi
 
         if [ ! -f config/certs/certs.zip ]
@@ -61,15 +61,31 @@ services:
           "      - localhost\n" \
           "    ip:\n" \
           "      - 127.0.0.1\n" \
+          "  - name: postgres-grafana\n" \
+          "    dns:\n" \
+          "      - postgres-grafana\n" \
+          "      - localhost\n" \
+          "    ip:\n" \
+          "      - 127.0.0.1\n" \
+          "  - name: grafana\n" \
+          "    dns:\n" \
+          "      - grafana\n" \
+          "      - localhost\n" \
+          "    ip:\n" \
+          "      - 127.0.0.1\n" \
           > config/certs/instances.yml
-          bin/elasticsearch-certutil cert --silent --pem --ca-cert config/certs/ca/ca.crt --ca-key config/certs/ca.key --in config/certs/instances.yml -out config/certs/certs.zip
+          bin/elasticsearch-certutil cert --silent --pem --ca-cert config/certs/ca/ca.crt --ca-key config/certs/ca/ca.key --in config/certs/instances.yml -out config/certs/certs.zip
           unzip config/certs/certs.zip -d config/certs
         fi
 
         echo "Setting file permissions"
-        find config/certs -type d ! -path '*logstash*' | xargs -I {} chown -R root:root {}
-        find config/certs -type d ! -path '*logstash*' | xargs -I {} chmod 750 {}
-        find config/certs -type f ! -path '*logstash*' | xargs -I {} chmod 640 {}
+        find config/certs -type d | xargs -I {} chown -R root:root {}
+        find config/certs -type d -name logstash | xargs -I {} chown -R 1000:1000 {}
+        find config/certs -type d -name postgres-grafana | xargs -I {} chown -R 999:999 {}
+        find config/certs -type d | xargs -I {} chmod 750 {}
+        find config/certs -type f -name *.crt | xargs -I {} chmod 644 {}
+        find config/certs -type f -name *.key | xargs -I {} chmod 640 {}
+        find config/certs -type f -name logstash.key -o -name postgres-grafana.key | xargs -I {} chmod 600 {}
 
         echo "Waiting for Elasticsearch"
         until curl -s --cacert config/certs/ca/ca.crt ${ELASTIC_URL} | grep -q "missing authentication credentials"
@@ -121,7 +137,7 @@ services:
 
         echo "Done"
     volumes:
-      - ${VOLUMES_PATH}/elasticsearch/certs:/usr/share/elasticsearch/config/certs
+      - ${VOLUMES_PATH}/certs:/usr/share/elasticsearch/config/certs
     networks:
       - els
     healthcheck:
@@ -153,7 +169,7 @@ services:
       # Путь к сертификату ssl
       - xpack.security.transport.ssl.certificate=certs/elasticsearch/elasticsearch.crt
       # Путь к сертификату издателя ssl
-      - xpack.security.transport.ssl.certificate_authorities=certs/ca/ca.crt
+      - xpack.security.transport.ssl.certificate_authorities=certs/ca.crt
       # Режим проверки сертификата
       - xpack.security.transport.ssl.verification_mode=certificate
       # Включение https
@@ -163,14 +179,14 @@ services:
       # Путь к сертификату https
       - xpack.security.http.ssl.certificate=certs/elasticsearch/elasticsearch.crt
       # Путь к сертификату издателя
-      - xpack.security.http.ssl.certificate_authorities=certs/ca/ca.crt
+      - xpack.security.http.ssl.certificate_authorities=certs/ca.crt
       # Тип лицензии
       - xpack.license.self_generated.type=basic
       # Пароль пользователя elastic
       - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
     volumes:
-      - ${VOLUMES_PATH}/elasticsearch/certs/elasticsearch:/usr/share/elasticsearch/config/certs/elasticsearch:ro
-      - ${VOLUMES_PATH}/elasticsearch/certs/ca:/usr/share/elasticsearch/config/certs/ca:ro
+      - ${VOLUMES_PATH}/certs/elasticsearch:/usr/share/elasticsearch/config/certs/elasticsearch:ro
+      - ${VOLUMES_PATH}/certs/ca/ca.crt:/usr/share/elasticsearch/config/certs/ca.crt:ro
       - ${VOLUMES_PATH}/elasticsearch/data:/usr/share/elasticsearch/data
     restart: always
     networks:
@@ -181,7 +197,7 @@ services:
       setup:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "curl -s --cacert config/certs/ca/ca.crt https://localhost:9200 | grep -q 'missing authentication credentials'"]
+      test: ["CMD-SHELL", "curl -s --cacert config/certs/ca.crt https://localhost:9200 | grep -q 'missing authentication credentials'"]
       interval: 10s
       timeout: 10s
       retries: 30
@@ -214,10 +230,10 @@ services:
       # Путь к закрытому ключу
       SERVER_SSL_KEY: config/certs/kibana/kibana.key
       # Путь к сертификату издателя
-      ELASTICSEARCH_SSL_CERTIFICATEAUTHORITIES: config/certs/ca/ca.crt
+      ELASTICSEARCH_SSL_CERTIFICATEAUTHORITIES: config/certs/ca.crt
     volumes:
-      - ${VOLUMES_PATH}/elasticsearch/certs/kibana:/usr/share/kibana/config/certs/kibana:ro
-      - ${VOLUMES_PATH}/elasticsearch/certs/ca:/usr/share/kibana/config/certs/ca:ro
+      - ${VOLUMES_PATH}/certs/kibana:/usr/share/kibana/config/certs/kibana:ro
+      - ${VOLUMES_PATH}/certs/ca/ca.crt:/usr/share/kibana/config/certs/ca.crt:ro
     restart: always
     ports:
       - "5601:5601"
@@ -226,8 +242,13 @@ services:
     depends_on:
       elasticsearch:
         condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 600M
     healthcheck:
-      test: ["CMD-SHELL", "curl -s --cacert config/certs/ca/ca.crt https://localhost:5601/api/status | grep -q 'available'"]
+      test: ["CMD-SHELL", "curl -s --cacert config/certs/ca.crt https://localhost:5601/api/status | grep -q 'available'"]
       interval: 10s
       timeout: 10s
       retries: 15
@@ -254,9 +275,10 @@ services:
       # Хосты Elasticsearch (для pipeline)
       ELASTICSEARCH_HOSTS: "${ELASTIC_URL}"
       # Путь к сертификату издателя
-      xpack.monitoring.elasticsearch.ssl.certificate_authority: config/certs/logstash/ca.crt
+      xpack.monitoring.elasticsearch.ssl.certificate_authority: config/certs/ca.crt
     volumes:
-      - ${VOLUMES_PATH}/elasticsearch/certs/logstash:/usr/share/logstash/config/certs/logstash:ro
+      - ${VOLUMES_PATH}/certs/logstash:/usr/share/logstash/config/certs/logstash:ro
+      - ${VOLUMES_PATH}/certs/ca/ca.crt:/usr/share/logstash/config/certs/ca.crt:ro
       - ./configs/logstash/pipelines.yml:/usr/share/logstash/config/pipelines.yml:ro
       - ./configs/logstash/pipelines:/usr/share/logstash/pipeline:ro
     restart: always
@@ -286,7 +308,8 @@ services:
     image: elastic/filebeat:${ELASTIC_VERSION}
     command: filebeat -e -strict.perms=false
     volumes:
-      - ${VOLUMES_PATH}/elasticsearch/certs/logstash:/usr/share/filebeat/config/certs/logstash:ro
+      - ${VOLUMES_PATH}/certs/logstash:/usr/share/filebeat/config/certs/logstash:ro
+      - ${VOLUMES_PATH}/certs/ca/ca.crt:/usr/share/filebeat/config/certs/ca.crt:ro
       - ./configs/filebeat/config.yml:/usr/share/filebeat/filebeat.yml:ro
       - ${VOLUMES_PATH}/filebeat:/metrics:ro
     restart: always
@@ -304,13 +327,30 @@ services:
     container_name: postgres-grafana
     secrets:
       - postgres_grafana_password
+    command:
+      - "postgres"
+      - "-c"
+      - "ssl=on"
+      - "-c"
+      - "ssl_ca_file=/etc/postgresql/ca.crt"
+      - "-c"
+      - "ssl_cert_file=/etc/postgresql/certs/postgres-grafana.crt"
+      - "-c"
+      - "ssl_key_file=/etc/postgresql/certs/postgres-grafana.key"
+      - "-c"
+      - "hba_file=/etc/postgresql/pg_hba.conf"
     environment:
       # Имя пользователя для доступа к БД
       POSTGRES_USER: ${GRAFANA_POSTGRES_USER}
       # Файл с паролем для доступа к БД
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_grafana_password
+      # База данных создаваемая по умолчанию
+      POSTGRES_DB: ${GRAFANA_POSTGRES_DB}
     volumes:
+      - ${VOLUMES_PATH}/certs/postgres-grafana:/etc/postgresql/certs:ro
+      - ${VOLUMES_PATH}/certs/ca/ca.crt:/etc/postgresql/ca.crt:ro
       - ${VOLUMES_PATH}/postgres/data:/var/lib/postgresql/data
+      - ./configs/postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
     restart: always
     ports:
       - 5432:5432
@@ -322,11 +362,14 @@ services:
           cpus: "0.5"
           memory: 600M
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${GRAFANA_POSTGRES_USER} -d ${GRAFANA_POSTGRES_USER}"]
+      test: ["CMD-SHELL", "pg_isready -U ${GRAFANA_POSTGRES_USER} -d ${GRAFANA_POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 15
       start_period: 10s
+    depends_on:
+      setup:
+        condition: service_healthy
 
   # Сервис Grafana
   grafana:
@@ -350,7 +393,19 @@ services:
       GF_DATABASE_USER: ${GRAFANA_POSTGRES_USER}
       # Файл с паролем для пользователя БД
       GF_DATABASE_PASSWORD__FILE: /run/secrets/postgres_grafana_password
+      # Использование SSL при связи с БД
+      GF_DATABASE_SSL_MODE: require
+      # Путь к сертификату издателя
+      GF_DATABASE_CA_CERT_PATH: /etc/grafana/ca.crt
+      # Протокол сервера
+      GF_SERVER_PROTOCOL: https
+      # Путь к сертификату
+      GF_SERVER_CERT_FILE: /etc/grafana/certs/grafana.crt
+      # Путь к закрытому ключу
+      GF_SERVER_CERT_KEY: /etc/grafana/certs/grafana.key
     volumes:
+      - ${VOLUMES_PATH}/certs/grafana:/etc/grafana/certs:ro
+      - ${VOLUMES_PATH}/certs/ca/ca.crt:/etc/grafana/ca.crt:ro
       - ${VOLUMES_PATH}/grafana/data:/var/lib/grafana
     restart: always
     ports:
@@ -366,7 +421,7 @@ services:
           cpus: "0.5"
           memory: 600M
     healthcheck:
-      test: ["CMD-SHELL", "curl -s http://localhost:3000/api/health || exit 1"]
+      test: ["CMD-SHELL", "curl -s --cacert /etc/grafana/ca.crt https://localhost:3000/api/health || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 15
