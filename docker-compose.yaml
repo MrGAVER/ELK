@@ -10,6 +10,9 @@ networks:
   # Сеть между Grafana и источниками данных
   grafana-data-sources:
     driver: bridge
+  # Сеть prometheus
+  prometheus:
+    driver: bridge
 
 secrets:
   # Пароль postgres используемый grafana
@@ -463,6 +466,29 @@ services:
       - 9090:9090
     networks:
       - grafana-data-sources
+      - prometheus
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 600M
+  
+  # Сбор метрик с elasticsearch
+  elasticsearch-exporter:
+    image: prometheuscommunity/elasticsearch-exporter
+    container_name: elasticsearch-exporter
+    command:
+      - '--es.uri=https://elastic:${ELASTIC_PASSWORD}@elasticsearch:9200'
+      - '--es.ca=/etc/ssl/cert/ca.crt'
+      - '--es.all'
+    volumes:
+      - ${VOLUMES_PATH}/certs/ca/ca.crt:/etc/ssl/cert/ca.crt:ro
+    restart: always
+    ports:
+      - 9114:9114
+    networks:
+      - els
+      - prometheus
     deploy:
       resources:
         limits:

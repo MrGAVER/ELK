@@ -24,3 +24,7 @@ scrape_configs:
       password_file: /run/secrets/prometheus_password
     static_configs:
       - targets: ["localhost:9090"]
+
+  - job_name: "elasticsearch"
+    static_configs:
+      - targets:  ["elasticsearch-exporter:9114"]
