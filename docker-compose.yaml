@@ -461,6 +461,7 @@ services:
       - ${VOLUMES_PATH}/prometheus/data:/prometheus
       - ./configs/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./configs/prometheus/web-config.yml:/etc/prometheus/web-config.yml:ro
+      - ./configs/prometheus/elasticsearch_exporter_alerting_rules.yml:/prometheus/rules/elasticsearch_exporter_alerting_rules.yml:ro
     restart: always
     ports:
       - 9090:9090
