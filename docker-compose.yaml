@@ -7,6 +7,9 @@ networks:
   # Сеть между Grafana и базой данных
   grafana-db:
     driver: bridge
+  # Сеть между Grafana и источниками данных
+  grafana-data-sources:
+    driver: bridge
 
 secrets:
   # Пароль postgres используемый grafana
@@ -15,6 +18,9 @@ secrets:
   # Пароль административной учетной записи grafana
   grafana_admin_password:
     file: ./secrets/grafana_admin_password
+  # Пароль prometheus
+  prometheus_password:
+    file: ./secrets/prometheus_password
 
 services:
   # Первоначальные настройки ES
@@ -73,6 +79,12 @@ services:
           "      - localhost\n" \
           "    ip:\n" \
           "      - 127.0.0.1\n" \
+          "  - name: prometheus\n" \
+          "    dns:\n" \
+          "      - prometheus\n" \
+          "      - localhost\n" \
+          "    ip:\n" \
+          "      - 127.0.0.1\n" \
           > config/certs/instances.yml
           bin/elasticsearch-certutil cert --silent --pem --ca-cert config/certs/ca/ca.crt --ca-key config/certs/ca/ca.key --in config/certs/instances.yml -out config/certs/certs.zip
           unzip config/certs/certs.zip -d config/certs
@@ -82,6 +94,7 @@ services:
         find config/certs -type d | xargs -I {} chown -R root:root {}
         find config/certs -type d -name logstash | xargs -I {} chown -R 1000:1000 {}
         find config/certs -type d -name postgres-grafana | xargs -I {} chown -R 999:999 {}
+        find config/certs -type d -name prometheus | xargs -I {} chown -R 65534:65534 {}
         find config/certs -type d | xargs -I {} chmod 750 {}
         find config/certs -type f -name *.crt | xargs -I {} chmod 644 {}
         find config/certs -type f -name *.key | xargs -I {} chmod 640 {}
@@ -412,6 +425,7 @@ services:
       - 3000:3000
     networks:
       - grafana-db
+      - grafana-data-sources
     depends_on:
       postgres-grafana:
         condition: service_healthy
@@ -426,3 +440,31 @@ services:
       timeout: 5s
       retries: 15
       start_period: 30s
+  
+  # Сервис Prometheus
+  prometheus:
+    image: prom/prometheus
+    container_name: prometheus
+    secrets:
+      - prometheus_password
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--web.config.file=/etc/prometheus/web-config.yml"
+    environment:
+      PROMETHEUS_PASS_HASH: ${PROMETHEUS_PASS_HASH}
+    volumes:
+      - ${VOLUMES_PATH}/certs/prometheus:/etc/prometheus/certs:ro
+      - ${VOLUMES_PATH}/certs/ca/ca.crt:/etc/ssl/cert/ca.crt:ro
+      - ${VOLUMES_PATH}/prometheus/data:/prometheus
+      - ./configs/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./configs/prometheus/web-config.yml:/etc/prometheus/web-config.yml:ro
+    restart: always
+    ports:
+      - 9090:9090
+    networks:
+      - grafana-data-sources
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 600M
